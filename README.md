@@ -27,9 +27,17 @@ logistics-env/
 │   ├── grader.py            # Deterministic task graders
 │   └── utils.py             # Helper utilities
 ├── inference.py             # Baseline agent with OpenAI
+├── test_environment.py      # No-API task demo runner
+├── verify_setup.py          # Dependency and environment checks
 ├── openenv.yaml             # Environment configuration
 ├── requirements.txt         # Python dependencies
 ├── Dockerfile               # Container configuration
+├── .env.example             # Environment variable template
+├── .gitignore               # Git ignore rules
+├── GETTING_STARTED.md       # Quick start guide
+├── FILE_STRUCTURE.md        # Detailed file inventory
+├── DELIVERY_SUMMARY.md      # Delivery and verification summary
+├── INDEX.md                 # Navigation index
 └── README.md                # This file
 ```
 
