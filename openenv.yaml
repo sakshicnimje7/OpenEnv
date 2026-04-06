@@ -1,0 +1,168 @@
+name: "warehouse-logistics-env"
+version: "1.0.0"
+description: "E-Commerce Logistics AI Environment - Warehouse Manager Simulator"
+
+environment:
+  class: "env.WarehouseLogisticsEnvironment"
+  entry_point: "env:WarehouseLogisticsEnvironment"
+
+specification:
+  openenv_version: "1.0"
+  compliant: true
+
+tasks:
+  - id: "easy_001"
+    name: "Single Order Stock Check"
+    difficulty: "easy"
+    description: "Check stock for a single order in a simple warehouse setup"
+    order_count: 1
+    warehouse_count: 2
+    max_steps: 10
+    
+  - id: "medium_001"
+    name: "Batch Processing with Address Validation"
+    difficulty: "medium"
+    description: "Process batch of orders with address validation and allocation"
+    order_count: 5
+    warehouse_count: 3
+    max_steps: 50
+    
+  - id: "hard_001"
+    name: "Multi-Warehouse Routing with Rerouting"
+    difficulty: "hard"
+    description: "Handle out-of-stock scenarios with multi-warehouse rerouting"
+    order_count: 4
+    warehouse_count: 3
+    max_steps: 100
+
+observation_space:
+  type: "object"
+  properties:
+    orders:
+      type: "array"
+      description: "List of orders in system"
+      items:
+        type: "object"
+        properties:
+          order_id:
+            type: "string"
+          sku:
+            type: "string"
+          quantity:
+            type: "integer"
+          address:
+            type: "string"
+          status:
+            type: "string"
+            enum: ["pending", "stock_checked", "address_validated", "allocated", "shipped", "failed"]
+          allocated_warehouse:
+            type: ["string", "null"]
+    
+    warehouses:
+      type: "array"
+      description: "Warehouse inventory state"
+      items:
+        type: "object"
+        properties:
+          warehouse_id:
+            type: "string"
+          city:
+            type: "string"
+          stock_level:
+            type: "object"
+          capacity:
+            type: "integer"
+    
+    step_count:
+      type: "integer"
+      description: "Current step number"
+    
+    processed_orders:
+      type: "integer"
+      description: "Number of completed orders"
+    
+    failed_orders:
+      type: "integer"
+      description: "Number of failed orders"
+    
+    last_action_result:
+      type: ["object", "null"]
+      description: "Result of last action"
+
+action_space:
+  type: "object"
+  properties:
+    action_type:
+      type: "string"
+      enum: ["check_stock", "validate_address", "allocate", "ship", "reroute"]
+      description: "Type of action"
+    
+    order_id:
+      type: "string"
+      description: "Target order identifier"
+    
+    warehouse:
+      type: ["string", "null"]
+      description: "Target warehouse (optional)"
+    
+    message:
+      type: "string"
+      description: "Optional reasoning"
+
+reward:
+  type: "object"
+  properties:
+    value:
+      type: "number"
+      description: "Reward value"
+    breakdown:
+      type: "object"
+      description: "Component breakdown"
+    reason:
+      type: "string"
+      description: "Reason for reward"
+  
+  shaping: true
+  description: |
+    Shaped reward providing intermediate feedback:
+    - CHECK_STOCK: +0.2 for finding stock
+    - VALIDATE_ADDRESS: +0.15 for valid, -0.15 for invalid
+    - ALLOCATE: +0.25 for successful, -0.15 for failed
+    - SHIP: +0.3 per shipment
+    - REROUTE: +0.2 for successful reroute
+    - Penalties for invalid actions: -0.1
+    - Final score: Grader-based between 0.0-1.0
+
+grading:
+  easy:
+    scorer: "env.grader.EasyTaskGrader"
+    criteria: "Single order completion and efficiency"
+    max_score: 1.0
+  
+  medium:
+    scorer: "env.grader.MediumTaskGrader"
+    criteria: "Batch processing accuracy and address validation"
+    max_score: 1.0
+  
+  hard:
+    scorer: "env.grader.HardTaskGrader"
+    criteria: "Multi-warehouse routing and rerouting effectiveness"
+    max_score: 1.0
+
+baseline:
+  agent: "inference.WarehouseAgentInference"
+  expected_score:
+    easy: 0.7
+    medium: 0.6
+    hard: 0.5
+
+rendering: false
+
+metadata:
+  author: "AI Systems Engineering"
+  language: "Python"
+  python_requires: ">=3.9"
+  dependencies:
+    - "pydantic>=2.0"
+    - "openai>=1.0"
+    - "python-dotenv"
