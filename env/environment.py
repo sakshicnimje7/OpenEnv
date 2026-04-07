@@ -4,9 +4,8 @@ Main environment implementation following OpenEnv specification.
 Implements the warehouse logistics simulator with step-based interaction.
 """
 
-from typing import Tuple, Dict, Any, Optional, List
+from typing import Tuple, Dict, Any, Optional, List, Set
 from copy import deepcopy
-import json
 
 from env.models import (
     Order, Action, ActionType, Observation, Reward, WarehouseLocation,
@@ -14,10 +13,7 @@ from env.models import (
 )
 from env.tasks import get_task
 from env.grader import get_grader
-from env.utils import (
-    validate_address, check_warehouse_stock, deduct_stock,
-    calculate_routing_score, format_action_reason
-)
+from env.utils import validate_address, check_warehouse_stock, deduct_stock
 
 
 class WarehouseLogisticsEnvironment:
@@ -45,6 +41,12 @@ class WarehouseLogisticsEnvironment:
         self.action_results: List[Dict[str, Any]] = []
         self.done: bool = False
         self.episode_reward: float = 0.0
+        self.step_penalty: float = -0.01
+        self.progress_bonus: float = 0.05
+        self.out_of_order_penalty: float = -0.04
+        self.repeat_action_penalty_step: float = -0.02
+        self._last_action_signature: Optional[Tuple[str, str, Optional[str]]] = None
+        self._repeat_action_count: int = 0
         
     def reset(self) -> Observation:
         """
@@ -62,6 +64,8 @@ class WarehouseLogisticsEnvironment:
         self.action_results = []
         self.done = False
         self.episode_reward = 0.0
+        self._last_action_signature = None
+        self._repeat_action_count = 0
         
         return self.state()
     
@@ -118,16 +122,24 @@ class WarehouseLogisticsEnvironment:
         
         # Validate action
         if not self._is_valid_action(action):
-            reward.value = -0.1
+            reward.value = -0.2 + self.step_penalty
             reward.reason = "Invalid action"
-            reward.breakdown['invalid'] = -0.1
+            reward.breakdown['invalid'] = -0.2
+            reward.breakdown['step_penalty'] = self.step_penalty
             info = self._get_step_info(action, reward)
-            self.action_results.append(reward.dict())
+            self.action_results.append(reward.model_dump())
             self.episode_reward += reward.value
             return self.state(), reward, False, info
         
+        target_order = next(o for o in self.orders if o.order_id == action.order_id)
+        pre_status = target_order.status
+
         # Execute action
         reward = self._execute_action(action)
+        post_status = target_order.status
+
+        # Apply shaped reward modifiers.
+        reward = self._apply_reward_shaping(action, pre_status, post_status, reward)
         
         # Check if task is complete
         if self._is_task_complete():
@@ -137,10 +149,105 @@ class WarehouseLogisticsEnvironment:
         info = self._get_step_info(action, reward)
         
         # Update tracking
-        self.action_results.append(reward.dict())
+        self.action_results.append(reward.model_dump())
         self.episode_reward += reward.value
         
         return self.state(), reward, self.done, info
+
+    def _status_rank(self, status: OrderStatus) -> int:
+        """
+        Convert order status to progression rank for reward shaping.
+
+        Args:
+            status: Current order status
+
+        Returns:
+            Integer progression rank
+        """
+        rank_map = {
+            OrderStatus.PENDING: 0,
+            OrderStatus.STOCK_CHECKED: 1,
+            OrderStatus.ADDRESS_VALIDATED: 1,
+            OrderStatus.ALLOCATED: 2,
+            OrderStatus.SHIPPED: 3,
+            OrderStatus.FAILED: -1,
+        }
+        return rank_map.get(status, 0)
+
+    def _expected_actions_for_status(self, status: OrderStatus) -> Set[ActionType]:
+        """
+        Return expected action types for a given order status.
+
+        Args:
+            status: Order status before action
+
+        Returns:
+            Set of expected action types
+        """
+        if status == OrderStatus.PENDING:
+            if self.task_difficulty == "medium":
+                return {ActionType.VALIDATE_ADDRESS, ActionType.CHECK_STOCK}
+            return {ActionType.CHECK_STOCK}
+        if status in {OrderStatus.STOCK_CHECKED, OrderStatus.ADDRESS_VALIDATED}:
+            return {ActionType.ALLOCATE, ActionType.REROUTE}
+        if status == OrderStatus.ALLOCATED:
+            return {ActionType.SHIP, ActionType.REROUTE}
+        return set()
+
+    def _apply_reward_shaping(
+        self,
+        action: Action,
+        pre_status: OrderStatus,
+        post_status: OrderStatus,
+        reward: Reward,
+    ) -> Reward:
+        """
+        Apply intermediate reward shaping to the base action reward.
+
+        This discourages loops and unnecessary actions while rewarding progress.
+
+        Args:
+            action: Executed action
+            pre_status: Order status before action
+            post_status: Order status after action
+            reward: Base reward from action handler
+
+        Returns:
+            Shaped reward
+        """
+        shaped_delta = 0.0
+
+        # Small per-step cost to encourage shorter trajectories.
+        shaped_delta += self.step_penalty
+        reward.breakdown['step_penalty'] = self.step_penalty
+
+        # Reward actual status progression.
+        progress = self._status_rank(post_status) - self._status_rank(pre_status)
+        if progress > 0:
+            progress_value = self.progress_bonus * progress
+            shaped_delta += progress_value
+            reward.breakdown['progress_bonus'] = progress_value
+
+        # Penalize actions that are out of order for the current status.
+        expected = self._expected_actions_for_status(pre_status)
+        if expected and action.action_type not in expected:
+            shaped_delta += self.out_of_order_penalty
+            reward.breakdown['out_of_order_penalty'] = self.out_of_order_penalty
+
+        # Penalize repeated identical actions on same order/warehouse to prevent loops.
+        signature = (action.action_type.value, action.order_id, action.warehouse)
+        if signature == self._last_action_signature:
+            self._repeat_action_count += 1
+            repeat_penalty = self.repeat_action_penalty_step * self._repeat_action_count
+            shaped_delta += repeat_penalty
+            reward.breakdown['repeat_penalty'] = repeat_penalty
+        else:
+            self._repeat_action_count = 0
+
+        self._last_action_signature = signature
+        reward.value = round(reward.value + shaped_delta, 6)
+        reward.reason = f"{reward.reason}; shaping={shaped_delta:+.3f}"
+        return reward
     
     def _is_valid_action(self, action: Action) -> bool:
         """
