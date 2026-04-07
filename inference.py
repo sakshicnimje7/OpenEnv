@@ -47,7 +47,7 @@ class WarehouseAgentInference:
         self.task_difficulty = task_difficulty
         self.model_name = model_name or os.getenv("MODEL_NAME", "gpt-3.5-turbo")
         self.api_base_url = api_base_url or os.getenv("API_BASE_URL", "")
-        self.api_key = os.getenv("OPENAI_API_KEY", "")
+        self.api_key = os.getenv("OPENAI_API_KEY") or os.getenv("HF_TOKEN", "")
         self.max_steps = max_steps
         self.max_api_failures = max_api_failures
         self.non_progress_threshold = non_progress_threshold
@@ -69,40 +69,43 @@ class WarehouseAgentInference:
         self.non_progress_steps = 0
         self.last_progress_marker: Optional[tuple[int, int]] = None
 
-    def log_start(self, task_info: Dict[str, Any]) -> None:
-        """Log episode start in required format."""
+    def log_start(self, task: str, env_name: str, model: str) -> None:
+        """Log episode start in required structured format."""
         message = (
             f"[START]\n"
-            f"Task: {task_info['difficulty']}\n"
-            f"Orders: {task_info['order_count']}\n"
-            f"Warehouses: {task_info['warehouse_count']}\n"
+            f"Task: {task}\n"
+            f"Env: {env_name}\n"
+            f"Model: {model}\n"
         )
         print(message)
 
     def log_step(
         self,
         step_num: int,
-        action: Action,
+        action: str,
         reward: float,
-        observation_summary: Dict[str, int],
+        done: bool,
+        error: Optional[str],
     ) -> None:
-        """Log step details in required format."""
+        """Log step details in required structured format."""
         message = (
             f"[STEP]\n"
             f"Step: {step_num}\n"
-            f"Action: {action.action_type.value}\n"
+            f"Action: {action}\n"
             f"Reward: {reward:.3f}\n"
-            f"Processed: {observation_summary['processed']}\n"
+            f"Done: {done}\n"
+            f"Error: {error}\n"
         )
         print(message)
 
-    def log_end(self, summary: Dict[str, Any]) -> None:
-        """Log episode end in required format."""
+    def log_end(self, success: bool, steps: int, score: float, rewards: List[float]) -> None:
+        """Log episode end in required structured format."""
         message = (
             f"[END]\n"
-            f"Total Reward: {summary['total_reward']:.3f}\n"
-            f"Completed: {summary['completed']}/{summary['total']}\n"
-            f"Steps: {summary['steps']}\n"
+            f"Success: {success}\n"
+            f"Steps: {steps}\n"
+            f"Score: {score:.4f}\n"
+            f"Rewards: {rewards}\n"
         )
         print(message)
 
@@ -174,8 +177,14 @@ Choose one next best action and respond with JSON only:
             end = response_text.rfind("}") + 1
             if start >= 0 and end > start:
                 payload = json.loads(response_text[start:end])
+                action_raw = str(payload.get("action_type", "check_stock")).strip().lower()
+                # Some models return combined choices like "check_stock|validate_address".
+                if "|" in action_raw:
+                    action_raw = action_raw.split("|")[0].strip()
+                if action_raw not in {item.value for item in ActionType}:
+                    action_raw = "check_stock"
                 return Action(
-                    action_type=ActionType(payload.get("action_type", "check_stock")),
+                    action_type=ActionType(action_raw),
                     order_id=payload.get("order_id", observation["orders"][0]["order_id"]),
                     warehouse=payload.get("warehouse"),
                     message=payload.get("reason", ""),
@@ -374,7 +383,11 @@ Choose one next best action and respond with JSON only:
         """
         observation = self.env.reset()
         task_info = self.env.get_task_info()
-        self.log_start(task_info)
+        self.log_start(
+            task=task_info.get("difficulty", self.task_difficulty),
+            env_name="warehouse-logistics-env",
+            model=self.model_name,
+        )
 
         self.history = []
         self.total_reward = 0.0
@@ -387,25 +400,41 @@ Choose one next best action and respond with JSON only:
         # Initialize progress marker from reset observation.
         self._update_progress_guard(observation.model_dump())
 
+        rewards: List[float] = []
         done = False
         while not done and self.action_count < self.max_steps:
             obs_dict = observation.model_dump()
             action = self._get_next_action(obs_dict, self.action_count + 1)
 
-            observation, reward, done, _info = self.env.step(action)
+            error: Optional[str] = None
+            try:
+                observation, reward, done, _info = self.env.step(action)
+            except Exception as exc:
+                error = str(exc)
+                done = True
+                reward_value = -0.2
+                self.log_step(
+                    step_num=self.action_count + 1,
+                    action=action.action_type.value,
+                    reward=reward_value,
+                    done=done,
+                    error=error,
+                )
+                rewards.append(reward_value)
+                break
+
             self._update_progress_guard(observation.model_dump())
 
             self.action_count += 1
             self.total_reward += reward.value
+            rewards.append(reward.value)
 
             self.log_step(
-                self.action_count,
-                action,
-                reward.value,
-                {
-                    "processed": observation.processed_orders,
-                    "total": len(observation.orders),
-                },
+                step_num=self.action_count,
+                action=action.action_type.value,
+                reward=reward.value,
+                done=done,
+                error=error,
             )
 
             self.history.append(
@@ -418,17 +447,52 @@ Choose one next best action and respond with JSON only:
             )
 
         completed = sum(1 for order in self.env.orders if order.status.value == "shipped")
+        total_orders = len(self.env.orders)
+        score = completed / total_orders if total_orders > 0 else 0.0
+        score = max(0.0, min(1.0, score))
+        success = score >= 0.8
+
         summary = {
             "total_reward": self.total_reward,
             "completed": completed,
-            "total": len(self.env.orders),
+            "total": total_orders,
             "steps": self.action_count,
             "task_difficulty": self.task_difficulty,
             "api_failures": self.api_failure_count,
+            "rewards": rewards,
+            "score": score,
+            "success": success,
         }
 
-        self.log_end(summary)
+        self.log_end(
+            success=summary["success"],
+            steps=summary["steps"],
+            score=summary["score"],
+            rewards=summary["rewards"],
+        )
         return summary
+
+
+def run_baseline_all_tasks(max_steps: int = 50) -> Dict[str, Any]:
+    """Run baseline evaluation across easy/medium/hard tasks."""
+    task_levels = ["easy", "medium", "hard"]
+    task_results: Dict[str, Dict[str, Any]] = {}
+    scores: List[float] = []
+
+    for level in task_levels:
+        agent = WarehouseAgentInference(task_difficulty=level, max_steps=max_steps)
+        result = agent.run_episode()
+        task_results[level] = result
+        scores.append(result["score"])
+
+    aggregate = sum(scores) / len(scores) if scores else 0.0
+    aggregate = max(0.0, min(1.0, aggregate))
+
+    return {
+        "tasks": task_results,
+        "aggregate_score": aggregate,
+        "all_success": all(r["success"] for r in task_results.values()),
+    }
 
 
 def main() -> int:
@@ -440,15 +504,28 @@ def main() -> int:
     print(f"Model: {os.getenv('MODEL_NAME', 'gpt-3.5-turbo')}")
     print()
 
-    agent = WarehouseAgentInference(task_difficulty=task_difficulty, max_steps=50)
-    result = agent.run_episode()
+    run_all = os.getenv("RUN_ALL_TASKS", "true").lower() == "true"
+    if run_all:
+        result = run_baseline_all_tasks(max_steps=50)
+    else:
+        agent = WarehouseAgentInference(task_difficulty=task_difficulty, max_steps=50)
+        single = agent.run_episode()
+        result = {
+            "tasks": {task_difficulty: single},
+            "aggregate_score": single["score"],
+            "all_success": single["success"],
+        }
 
     print("\n=== INFERENCE COMPLETE ===")
-    print(f"Final Reward: {result['total_reward']:.3f}")
-    print(f"Orders Completed: {result['completed']}/{result['total']}")
-    print(f"Total Steps: {result['steps']}")
+    for level, item in result["tasks"].items():
+        print(
+            f"Task={level} | Score={item['score']:.4f} | "
+            f"Completed={item['completed']}/{item['total']} | Steps={item['steps']}"
+        )
+    print(f"Aggregate Score: {result['aggregate_score']:.4f}")
 
-    return 0 if result["completed"] > 0 else 1
+    # Exit 0 when inference completes and scores are produced for all tasks.
+    return 0
 
 
 if __name__ == "__main__":
