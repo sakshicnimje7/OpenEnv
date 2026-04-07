@@ -1,0 +1,20 @@
+[project]
+name = "warehouse-logistics-env"
+version = "1.0.0"
+description = "E-Commerce Logistics AI Environment (Warehouse Manager Simulator)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "pydantic>=2.0,<3.0",
+  "openai>=2.7.2",
+  "python-dotenv>=1.0",
+  "pyyaml>=6.0",
+  "openenv-core>=0.2.0",
+]
+
+[project.scripts]
+server = "server.app:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
