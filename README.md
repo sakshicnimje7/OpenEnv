@@ -11,7 +11,7 @@ A production-ready OpenEnv-compliant environment for training AI agents in wareh
 - ✅ **3 Difficulty Levels**: Easy (single order), Medium (batch processing), Hard (multi-warehouse routing)
 - ✅ **Shaped Rewards**: Intermediate rewards guide agent learning, not binary rewards
 - ✅ **Deterministic Grading**: Each task has a deterministic grader returning scores 0.0-1.0
-- ✅ **OpenAI Integration**: Baseline agent uses OpenAI API with async execution
+- ✅ **OpenAI Integration**: Baseline agent uses the OpenAI client with deterministic defaults
 - ✅ **Dockerized**: Production-ready Dockerfile with dependencies
 - ✅ **Comprehensive Logging**: Exact logging format [START], [STEP], [END]
 
@@ -68,7 +68,8 @@ cp .env.example .env
 docker build -t warehouse-logistics-env .
 
 # Run container
-docker run -e OPENAI_API_KEY=your_key \
+docker run -p 7860:7860 \
+           -e OPENAI_API_KEY=your_key \
            -e TASK_DIFFICULTY=easy \
            warehouse-logistics-env
 ```
@@ -283,35 +284,52 @@ Output format:
 ```
 [START]
 Task: easy
-Orders: 1
-Warehouses: 2
+Env: warehouse-logistics-env
+Model: gpt-3.5-turbo
 
 [STEP]
 Step: 1
 Action: check_stock
 Reward: 0.200
-Processed: 0/1
-
-[STEP]
-Step: 2
-Action: allocate
-Reward: 0.250
-Processed: 0/1
+Done: False
+Error:
 
 [END]
-Total Reward: 0.725
-Completed: 1/1
+Success: True
 Steps: 3
+Score: 1.0000
+Rewards: [0.24, 0.29, 0.34]
 ```
 
 ### Run in Docker
 
 ```bash
 docker run -it \
+    -p 7860:7860 \
   -e OPENAI_API_KEY=sk-... \
   -e TASK_DIFFICULTY=medium \
   warehouse-logistics-env
 ```
+
+### Deploy to Hugging Face Spaces (Docker)
+
+This repository includes a Docker Space config in `space.yaml` with the `openenv` tag.
+
+1. Create a new Hugging Face Space and select `Docker` SDK.
+2. Push this repository to the Space.
+3. Set required Space secrets:
+     - `OPENAI_API_KEY` (or `HF_TOKEN` as fallback)
+     - `MODEL_NAME`
+     - `API_BASE_URL`
+4. Confirm the Space is healthy:
+     - `GET /health` returns `200`
+     - `POST /reset` returns an initial observation
+
+The container serves an API on port `7860` with endpoints:
+- `GET /health`
+- `POST /reset`
+- `GET /state`
+- `POST /step`
 
 ## Configuration
 
@@ -323,6 +341,9 @@ MODEL_NAME              # Model (default: gpt-3.5-turbo)
 API_BASE_URL            # Custom API base URL (optional)
 HF_TOKEN                # Hugging Face token (optional, for compatibility)
 TASK_DIFFICULTY         # Task difficulty: easy, medium, hard
+MODEL_TEMPERATURE       # Default: 0.0 for reproducible decoding
+API_TIMEOUT_SECONDS     # API timeout in seconds (default: 30)
+RUN_ALL_TASKS           # true/false; run easy, medium, hard in one invocation
 ```
 
 ### YAML Configuration
@@ -422,12 +443,34 @@ python -m pylint env/
 python -m mypy env/
 ```
 
+## Hackathon Pre-Submission Validation
+
+Run these checks before submitting:
+
+```bash
+# 1) Build container
+docker build -t warehouse-logistics-env .
+
+# 2) Validate OpenEnv spec
+openenv validate
+
+# 3) Run baseline inference (all tasks)
+RUN_ALL_TASKS=true python inference.py
+```
+
+For strict evaluator parsing, `inference.py` writes structured logs to stdout using only:
+- `[START]`
+- `[STEP]`
+- `[END]`
+
+Debug diagnostics are emitted to stderr to avoid corrupting parser input.
+
 ## Code Quality
 
 - ✅ Type hints on all functions
 - ✅ Docstrings for all methods
 - ✅ No placeholder code
-- ✅ Fully deterministic for reproducibility
+- ✅ Deterministic graders and deterministic fallback policy
 - ✅ Production-ready error handling
 - ✅ Clean modular architecture
 
@@ -437,16 +480,22 @@ The inference script logs exactly as specified:
 
 ```
 [START]
-<task info>
+Task: <difficulty>
+Env: <env name>
+Model: <model name>
 
 [STEP]
-<action results>
-
-[STEP]
-...
+Step: <n>
+Action: <action>
+Reward: <float>
+Done: <bool>
+Error: <error or empty>
 
 [END]
-<episode summary>
+Success: <bool>
+Steps: <int>
+Score: <0.0-1.0>
+Rewards: <list>
 ```
 
 ## Environment Variables Template
@@ -458,6 +507,9 @@ MODEL_NAME=gpt-3.5-turbo
 API_BASE_URL=
 HF_TOKEN=
 TASK_DIFFICULTY=easy
+MODEL_TEMPERATURE=0.0
+API_TIMEOUT_SECONDS=30
+RUN_ALL_TASKS=true
 ```
 
 ## Troubleshooting
@@ -501,4 +553,4 @@ For issues, questions, or contributions:
 
 ---
 
-**Production-Ready** | **OpenEnv Compliant** | **Deterministic** | **Type-Safe**
+**Production-Ready** | **OpenEnv Compliant** | **Reproducible Baseline Defaults** | **Type-Safe**

@@ -12,10 +12,10 @@ from pathlib import Path
 
 
 def check_python_version():
-    """Check if Python version is 3.9+."""
+    """Check if Python version is 3.10+."""
     version = sys.version_info
-    if version.major < 3 or (version.major == 3 and version.minor < 9):
-        print("[FAIL] Python 3.9+ required")
+    if version.major < 3 or (version.major == 3 and version.minor < 10):
+        print("[FAIL] Python 3.10+ required")
         return False
     print(f"[OK] Python {version.major}.{version.minor}.{version.micro}")
     return True
@@ -55,6 +55,9 @@ def check_dependencies():
         'pydantic',
         'openai',
         'dotenv',
+        'openenv',
+        'fastapi',
+        'uvicorn',
     ]
     
     all_ok = True
@@ -90,7 +93,7 @@ def check_environment_setup():
         return True
     else:
         print(f"[WARN] .env not found (run: cp .env.example .env)")
-        return False
+        return True
 
 
 def test_imports():
