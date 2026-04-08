@@ -20,6 +20,12 @@ from env import Action, ActionType, WarehouseLogisticsEnvironment
 load_dotenv()
 
 
+def _debug(message: str) -> None:
+    """Write diagnostic logs to stderr so stdout stays parser-safe."""
+    if os.getenv("ENABLE_DEBUG_LOGS", "false").lower() == "true":
+        print(message, file=sys.stderr, flush=True)
+
+
 class WarehouseAgentInference:
     """AI agent for warehouse logistics using an OpenAI-compatible client."""
 
@@ -28,6 +34,8 @@ class WarehouseAgentInference:
         task_difficulty: str = "easy",
         model_name: Optional[str] = None,
         api_base_url: Optional[str] = None,
+        model_temperature: Optional[float] = None,
+        request_timeout_seconds: Optional[float] = None,
         max_steps: int = 50,
         max_api_failures: int = 5,
         non_progress_threshold: int = 3,
@@ -39,6 +47,8 @@ class WarehouseAgentInference:
             task_difficulty: Task difficulty (easy, medium, hard)
             model_name: Model name override
             api_base_url: API base URL override
+            model_temperature: Sampling temperature override
+            request_timeout_seconds: API timeout override (seconds)
             max_steps: Maximum steps in one episode
             max_api_failures: Number of API failures before switching to local policy
             non_progress_threshold: Number of consecutive non-progress steps before
@@ -48,15 +58,35 @@ class WarehouseAgentInference:
         self.model_name = model_name or os.getenv("MODEL_NAME", "gpt-3.5-turbo")
         self.api_base_url = api_base_url or os.getenv("API_BASE_URL", "")
         self.api_key = os.getenv("OPENAI_API_KEY") or os.getenv("HF_TOKEN", "")
+
+        temperature_raw = model_temperature
+        if temperature_raw is None:
+            temperature_raw = os.getenv("MODEL_TEMPERATURE", "0.0")
+        try:
+            self.model_temperature = max(0.0, min(2.0, float(temperature_raw)))
+        except (TypeError, ValueError):
+            self.model_temperature = 0.0
+
+        timeout_raw = request_timeout_seconds
+        if timeout_raw is None:
+            timeout_raw = os.getenv("API_TIMEOUT_SECONDS", "30")
+        try:
+            self.request_timeout_seconds = max(1.0, float(timeout_raw))
+        except (TypeError, ValueError):
+            self.request_timeout_seconds = 30.0
+
         self.max_steps = max_steps
         self.max_api_failures = max_api_failures
         self.non_progress_threshold = non_progress_threshold
 
         # Keep OpenAI client usage intact and compatible with custom base URLs.
+        client_kwargs: Dict[str, Any] = {
+            "api_key": self.api_key,
+            "timeout": self.request_timeout_seconds,
+        }
         if self.api_base_url:
-            self.client = OpenAI(base_url=self.api_base_url, api_key=self.api_key)
-        else:
-            self.client = OpenAI(api_key=self.api_key)
+            client_kwargs["base_url"] = self.api_base_url
+        self.client = OpenAI(**client_kwargs)
 
         self.env = WarehouseLogisticsEnvironment(task_difficulty=task_difficulty)
 
@@ -77,7 +107,7 @@ class WarehouseAgentInference:
             f"Env: {env_name}\n"
             f"Model: {model}\n"
         )
-        print(message)
+        print(message, flush=True)
 
     def log_step(
         self,
@@ -88,15 +118,16 @@ class WarehouseAgentInference:
         error: Optional[str],
     ) -> None:
         """Log step details in required structured format."""
+        error_text = error if error is not None else ""
         message = (
             f"[STEP]\n"
             f"Step: {step_num}\n"
             f"Action: {action}\n"
             f"Reward: {reward:.3f}\n"
             f"Done: {done}\n"
-            f"Error: {error}\n"
+            f"Error: {error_text}\n"
         )
-        print(message)
+        print(message, flush=True)
 
     def log_end(self, success: bool, steps: int, score: float, rewards: List[float]) -> None:
         """Log episode end in required structured format."""
@@ -107,7 +138,7 @@ class WarehouseAgentInference:
             f"Score: {score:.4f}\n"
             f"Rewards: {rewards}\n"
         )
-        print(message)
+        print(message, flush=True)
 
     def _build_prompt(self, observation: Dict[str, Any], step_num: int) -> str:
         """
@@ -190,8 +221,8 @@ Choose one next best action and respond with JSON only:
                     message=payload.get("reason", ""),
                 )
         except Exception as parse_err:
-            print(f"[DEBUG] Failed to parse model response: {parse_err}")
-            print(f"[DEBUG] Raw model content: {response_text}")
+            _debug(f"[DEBUG] Failed to parse model response: {parse_err}")
+            _debug(f"[DEBUG] Raw model content: {response_text}")
 
         return self._get_local_policy_action(observation)
 
@@ -326,7 +357,7 @@ Choose one next best action and respond with JSON only:
             response = self.client.chat.completions.create(
                 model=self.model_name,
                 messages=messages,
-                temperature=0.2,
+                temperature=self.model_temperature,
             )
             response_text = response.choices[0].message.content
             if not response_text:
@@ -334,12 +365,15 @@ Choose one next best action and respond with JSON only:
             return self._parse_action_response(response_text, observation)
         except Exception as api_err:
             self.api_failure_count += 1
-            print(f"[DEBUG] API call failed ({self.api_failure_count}/{self.max_api_failures}): {api_err}")
-            print(f"[DEBUG] base_url={self.api_base_url}, model={self.model_name}")
+            _debug(
+                "[DEBUG] API call failed "
+                f"({self.api_failure_count}/{self.max_api_failures}): {api_err}"
+            )
+            _debug(f"[DEBUG] base_url={self.api_base_url}, model={self.model_name}")
 
             if self.api_failure_count >= self.max_api_failures:
                 self.disable_api = True
-                print("[DEBUG] API disabled for this episode; switching to local policy.")
+                _debug("[DEBUG] API disabled for this episode; switching to local policy.")
 
             return self._get_local_policy_action(observation)
 
@@ -368,7 +402,7 @@ Choose one next best action and respond with JSON only:
 
         if not self.disable_api and self.non_progress_steps >= self.non_progress_threshold:
             self.disable_api = True
-            print(
+            _debug(
                 "[DEBUG] Non-progress guard triggered "
                 f"({self.non_progress_steps} stalled steps). "
                 "Switching to local policy."
@@ -499,30 +533,12 @@ def main() -> int:
     """Main entry point for running baseline inference."""
     task_difficulty = os.getenv("TASK_DIFFICULTY", "easy")
 
-    print("Starting warehouse logistics inference...")
-    print(f"Task difficulty: {task_difficulty}")
-    print(f"Model: {os.getenv('MODEL_NAME', 'gpt-3.5-turbo')}")
-    print()
-
     run_all = os.getenv("RUN_ALL_TASKS", "true").lower() == "true"
     if run_all:
-        result = run_baseline_all_tasks(max_steps=50)
+        _ = run_baseline_all_tasks(max_steps=50)
     else:
         agent = WarehouseAgentInference(task_difficulty=task_difficulty, max_steps=50)
-        single = agent.run_episode()
-        result = {
-            "tasks": {task_difficulty: single},
-            "aggregate_score": single["score"],
-            "all_success": single["success"],
-        }
-
-    print("\n=== INFERENCE COMPLETE ===")
-    for level, item in result["tasks"].items():
-        print(
-            f"Task={level} | Score={item['score']:.4f} | "
-            f"Completed={item['completed']}/{item['total']} | Steps={item['steps']}"
-        )
-    print(f"Aggregate Score: {result['aggregate_score']:.4f}")
+        _ = agent.run_episode()
 
     # Exit 0 when inference completes and scores are produced for all tasks.
     return 0

@@ -78,7 +78,7 @@ class WarehouseLogisticsEnvironment:
         """
         processed_count = sum(
             1 for o in self.orders
-            if o.status in [OrderStatus.SHIPPED, OrderStatus.ALLOCATED]
+            if o.status == OrderStatus.SHIPPED
         )
         failed_count = sum(
             1 for o in self.orders
@@ -640,6 +640,12 @@ class WarehouseLogisticsEnvironment:
         """
         completed_orders = sum(1 for o in self.orders if o.status == OrderStatus.SHIPPED)
         failed_orders = sum(1 for o in self.orders if o.status == OrderStatus.FAILED)
+        final_score = get_grader(self.task_difficulty).grade(
+            self.orders,
+            self.warehouses,
+            self.action_history,
+            self.step_count,
+        )
         
         return {
             'task_difficulty': self.task_difficulty,
@@ -648,6 +654,7 @@ class WarehouseLogisticsEnvironment:
             'completed_orders': completed_orders,
             'failed_orders': failed_orders,
             'episode_reward': self.episode_reward,
+            'final_grader_score': final_score,
             'actions_taken': len(self.action_history),
             'final_warehouse_states': [
                 {

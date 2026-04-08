@@ -162,7 +162,15 @@ metadata:
   author: "AI Systems Engineering"
   language: "Python"
   python_requires: ">=3.10"
+  tags:
+    - "openenv"
+    - "warehouse-logistics"
+    - "agent-evaluation"
   dependencies:
     - "pydantic>=2.0"
     - "openai>=1.0"
     - "python-dotenv"
+    - "pyyaml>=6.0"
+    - "openenv-core>=0.2.0"
+    - "fastapi>=0.115.0"
+    - "uvicorn>=0.30.0"

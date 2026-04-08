@@ -23,6 +23,14 @@ USER appuser
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV TASK_DIFFICULTY=easy
+ENV MODEL_NAME=gpt-3.5-turbo
+ENV API_BASE_URL=
+ENV HF_TOKEN=
+ENV OPENAI_API_KEY=
+ENV PORT=7860
 
-# Run inference by default
-CMD ["python", "inference.py"]
+# Expose service port used by HF Spaces Docker runtime
+EXPOSE 7860
+
+# Run API server by default
+CMD ["python", "-m", "server.app"]

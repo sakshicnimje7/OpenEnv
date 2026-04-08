@@ -4,7 +4,7 @@ This guide will get you up and running with the Warehouse Logistics AI Environme
 
 ## Prerequisites
 
-- Python 3.9+
+- Python 3.10+
 - pip (Python package manager)
 - Optional: OpenAI API key (for inference)
 - Optional: Docker (for containerized deployment)
@@ -32,7 +32,7 @@ python verify_setup.py
 
 Expected output:
 ```
-✅ Python 3.9.x
+✅ Python 3.10.x
 ✅ Project Structure
 ✅ Dependencies
 ✅ Module Imports
@@ -80,19 +80,21 @@ Output follows exact format:
 ```
 [START]
 Task: easy
-Orders: 1
-Warehouses: 2
+Env: warehouse-logistics-env
+Model: gpt-3.5-turbo
 
 [STEP]
 Step: 1
 Action: check_stock
 Reward: 0.200
-Processed: 0/1
+Done: False
+Error:
 
 [END]
-Total Reward: 0.725
-Completed: 1/1
+Success: True
 Steps: 3
+Score: 1.0000
+Rewards: [0.24, 0.29, 0.34]
 ```
 
 ### 4. Try Different Tasks
@@ -117,9 +119,17 @@ docker build -t warehouse-logistics .
 
 ```bash
 docker run -it \
+  -p 7860:7860 \
   -e OPENAI_API_KEY=sk-your-key \
   -e TASK_DIFFICULTY=easy \
   warehouse-logistics
+```
+
+Then verify service endpoints:
+
+```bash
+curl http://localhost:7860/health
+curl -X POST http://localhost:7860/reset
 ```
 
 ## Project Structure Overview
