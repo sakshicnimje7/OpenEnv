@@ -612,7 +612,7 @@ class WarehouseLogisticsEnvironment:
             'action_type': action.action_type.value,
             'reward': reward.value,
             'done': done,
-            'episode_reward': self.episode_reward,
+            'episode_reward': max(self._score_min, min(self._score_max, self.episode_reward)),
             'task_difficulty': self.task_difficulty,
         }
     
@@ -650,6 +650,10 @@ class WarehouseLogisticsEnvironment:
             self.step_count,
         )
         final_score = max(self._score_min, min(self._score_max, final_score))
+        clipped_episode_reward = max(
+            self._score_min,
+            min(self._score_max, self.episode_reward),
+        )
         
         return {
             'task_difficulty': self.task_difficulty,
@@ -657,7 +661,7 @@ class WarehouseLogisticsEnvironment:
             'total_orders': len(self.orders),
             'completed_orders': completed_orders,
             'failed_orders': failed_orders,
-            'episode_reward': self.episode_reward,
+            'episode_reward': clipped_episode_reward,
             'final_grader_score': final_score,
             'actions_taken': len(self.action_history),
             'final_warehouse_states': [
