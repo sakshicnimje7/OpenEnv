@@ -47,6 +47,8 @@ class WarehouseLogisticsEnvironment:
         self.repeat_action_penalty_step: float = -0.02
         self._last_action_signature: Optional[Tuple[str, str, Optional[str]]] = None
         self._repeat_action_count: int = 0
+        self._score_min: float = 0.01
+        self._score_max: float = 0.99
         
     def reset(self) -> Observation:
         """
@@ -580,6 +582,7 @@ class WarehouseLogisticsEnvironment:
             self.action_history,
             self.step_count
         )
+        score = max(self._score_min, min(self._score_max, score))
         
         return Reward(
             value=score,
@@ -646,6 +649,7 @@ class WarehouseLogisticsEnvironment:
             self.action_history,
             self.step_count,
         )
+        final_score = max(self._score_min, min(self._score_max, final_score))
         
         return {
             'task_difficulty': self.task_difficulty,
@@ -664,3 +668,10 @@ class WarehouseLogisticsEnvironment:
                 for w in self.warehouses
             ]
         }
+
+    def close(self) -> None:
+        """Release environment resources.
+
+        The simulator does not hold external handles, so this is a no-op.
+        """
+        return None

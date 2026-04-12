@@ -131,26 +131,26 @@ reward:
     - SHIP: +0.3 per shipment
     - REROUTE: +0.2 for successful reroute
     - Penalties for invalid actions: -0.1
-    - Final score: Grader-based between 0.0-1.0
+    - Final score: Grader-based strictly between 0.0-1.0
 
 grading:
   easy:
     scorer: "env.grader.EasyTaskGrader"
     criteria: "Single order completion and efficiency"
-    max_score: 1.0
+    max_score: 0.99
   
   medium:
     scorer: "env.grader.MediumTaskGrader"
     criteria: "Batch processing accuracy and address validation"
-    max_score: 1.0
+    max_score: 0.99
   
   hard:
     scorer: "env.grader.HardTaskGrader"
     criteria: "Multi-warehouse routing and rerouting effectiveness"
-    max_score: 1.0
+    max_score: 0.99
 
 baseline:
-  agent: "inference.WarehouseAgentInference"
+  agent: "inference.main"
   expected_score:
     easy: 0.7
     medium: 0.6

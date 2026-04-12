@@ -1,548 +1,267 @@
 """
-Baseline inference script using OpenAI-compatible chat API.
+Baseline inference script using the OpenAI client.
 
-Executes the warehouse logistics environment with an AI agent powered by an
-OpenAI-compatible endpoint (for example, Hugging Face Inference API).
-Follows exact logging format: [START], [STEP], [END]
+The script runs all three OpenEnv tasks and prints only the required stdout
+records: [START], [STEP], and [END].
 """
 
 import json
 import os
-import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from dotenv import load_dotenv
 from openai import OpenAI
 
 from env import Action, ActionType, WarehouseLogisticsEnvironment
 
-# Load environment variables from .env
 load_dotenv()
 
+API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4.1-mini")
+HF_TOKEN = os.getenv("HF_TOKEN")
 
-def _debug(message: str) -> None:
-    """Write diagnostic logs to stderr so stdout stays parser-safe."""
-    if os.getenv("ENABLE_DEBUG_LOGS", "false").lower() == "true":
-        print(message, file=sys.stderr, flush=True)
+if HF_TOKEN is None:
+    raise ValueError("HF_TOKEN environment variable is required")
+
+client = OpenAI(base_url=API_BASE_URL, api_key=HF_TOKEN)
+BENCHMARK_NAME = "openenv"
+TASKS = ("easy", "medium", "hard")
+MAX_STEPS = 50
 
 
-class WarehouseAgentInference:
-    """AI agent for warehouse logistics using an OpenAI-compatible client."""
+def _format_bool(value: bool) -> str:
+    return "true" if value else "false"
 
-    def __init__(
-        self,
-        task_difficulty: str = "easy",
-        model_name: Optional[str] = None,
-        api_base_url: Optional[str] = None,
-        model_temperature: Optional[float] = None,
-        request_timeout_seconds: Optional[float] = None,
-        max_steps: int = 50,
-        max_api_failures: int = 5,
-        non_progress_threshold: int = 3,
-    ) -> None:
-        """
-        Initialize inference agent.
 
-        Args:
-            task_difficulty: Task difficulty (easy, medium, hard)
-            model_name: Model name override
-            api_base_url: API base URL override
-            model_temperature: Sampling temperature override
-            request_timeout_seconds: API timeout override (seconds)
-            max_steps: Maximum steps in one episode
-            max_api_failures: Number of API failures before switching to local policy
-            non_progress_threshold: Number of consecutive non-progress steps before
-                forcing local policy
-        """
-        self.task_difficulty = task_difficulty
-        self.model_name = model_name or os.getenv("MODEL_NAME", "gpt-3.5-turbo")
-        self.api_base_url = api_base_url or os.getenv("API_BASE_URL", "")
-        self.api_key = os.getenv("OPENAI_API_KEY") or os.getenv("HF_TOKEN", "")
+def _format_reward(value: float) -> str:
+    return f"{value:.2f}"
 
-        temperature_raw = model_temperature
-        if temperature_raw is None:
-            temperature_raw = os.getenv("MODEL_TEMPERATURE", "0.0")
-        try:
-            self.model_temperature = max(0.0, min(2.0, float(temperature_raw)))
-        except (TypeError, ValueError):
-            self.model_temperature = 0.0
 
-        timeout_raw = request_timeout_seconds
-        if timeout_raw is None:
-            timeout_raw = os.getenv("API_TIMEOUT_SECONDS", "30")
-        try:
-            self.request_timeout_seconds = max(1.0, float(timeout_raw))
-        except (TypeError, ValueError):
-            self.request_timeout_seconds = 30.0
+def _format_rewards(values: Sequence[float]) -> str:
+    return ",".join(_format_reward(value) for value in values)
 
-        self.max_steps = max_steps
-        self.max_api_failures = max_api_failures
-        self.non_progress_threshold = non_progress_threshold
 
-        # Keep OpenAI client usage intact and compatible with custom base URLs.
-        client_kwargs: Dict[str, Any] = {
-            "api_key": self.api_key,
-            "timeout": self.request_timeout_seconds,
-        }
-        if self.api_base_url:
-            client_kwargs["base_url"] = self.api_base_url
-        self.client = OpenAI(**client_kwargs)
+def _log_start(task_name: str) -> None:
+    print(f"[START] task={task_name} env={BENCHMARK_NAME} model={MODEL_NAME}", flush=True)
 
-        self.env = WarehouseLogisticsEnvironment(task_difficulty=task_difficulty)
 
-        # Runtime tracking
-        self.history: List[Dict[str, Any]] = []
-        self.total_reward = 0.0
-        self.action_count = 0
-        self.api_failure_count = 0
-        self.disable_api = False
-        self.non_progress_steps = 0
-        self.last_progress_marker: Optional[tuple[int, int]] = None
+def _log_step(step_num: int, action_text: str, reward: float, done: bool, error: Optional[str]) -> None:
+    error_text = error if error is not None else "null"
+    print(
+        f"[STEP] step={step_num} action={action_text} reward={_format_reward(reward)} "
+        f"done={_format_bool(done)} error={error_text}",
+        flush=True,
+    )
 
-    def log_start(self, task: str, env_name: str, model: str) -> None:
-        """Log episode start in required structured format."""
-        message = (
-            f"[START]\n"
-            f"Task: {task}\n"
-            f"Env: {env_name}\n"
-            f"Model: {model}\n"
+
+def _log_end(success: bool, steps: int, rewards: Sequence[float]) -> None:
+    print(
+        f"[END] success={_format_bool(success)} steps={steps} rewards={_format_rewards(rewards)}",
+        flush=True,
+    )
+
+
+def _serialize_action(action: Action) -> str:
+    if action.warehouse is None:
+        return f"{action.action_type.value}('{action.order_id}')"
+    return f"{action.action_type.value}('{action.order_id}','{action.warehouse}')"
+
+
+def _get_actionable_order(observation: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    for order in observation["orders"]:
+        if order["status"] not in {"shipped", "failed"}:
+            return order
+    return None
+
+
+def _find_available_warehouse(observation: Dict[str, Any], sku: str, quantity: int) -> Optional[str]:
+    for candidate in observation["warehouses"]:
+        if candidate["stock_level"].get(sku, 0) >= quantity:
+            return candidate["warehouse_id"]
+    return None
+
+
+def _build_pending_action(order: Dict[str, Any], task_difficulty: str) -> Action:
+    if task_difficulty == "medium":
+        return Action(
+            action_type=ActionType.VALIDATE_ADDRESS,
+            order_id=order["order_id"],
+            warehouse=None,
+            message="validate address",
         )
-        print(message, flush=True)
+    return Action(
+        action_type=ActionType.CHECK_STOCK,
+        order_id=order["order_id"],
+        warehouse=None,
+        message="check stock",
+    )
 
-    def log_step(
-        self,
-        step_num: int,
-        action: str,
-        reward: float,
-        done: bool,
-        error: Optional[str],
-    ) -> None:
-        """Log step details in required structured format."""
-        error_text = error if error is not None else ""
-        message = (
-            f"[STEP]\n"
-            f"Step: {step_num}\n"
-            f"Action: {action}\n"
-            f"Reward: {reward:.3f}\n"
-            f"Done: {done}\n"
-            f"Error: {error_text}\n"
-        )
-        print(message, flush=True)
 
-    def log_end(self, success: bool, steps: int, score: float, rewards: List[float]) -> None:
-        """Log episode end in required structured format."""
-        message = (
-            f"[END]\n"
-            f"Success: {success}\n"
-            f"Steps: {steps}\n"
-            f"Score: {score:.4f}\n"
-            f"Rewards: {rewards}\n"
-        )
-        print(message, flush=True)
+def _build_progressed_action(order: Dict[str, Any], observation: Dict[str, Any]) -> Action:
+    warehouse = order.get("allocated_warehouse")
+    if not warehouse:
+        warehouse = _find_available_warehouse(observation, order["sku"], order["quantity"])
 
-    def _build_prompt(self, observation: Dict[str, Any], step_num: int) -> str:
-        """
-        Build prompt for model inference.
-
-        Args:
-            observation: Current environment observation
-            step_num: Current step number
-
-        Returns:
-            Prompt text
-        """
-        orders_summary = "\n".join(
-            [
-                (
-                    f"- Order {o['order_id']}: {o['sku']} x{o['quantity']}, "
-                    f"status={o['status']}, address={o['address'][:30]}..."
-                )
-                for o in observation["orders"][:5]
-            ]
+    if warehouse:
+        return Action(
+            action_type=ActionType.ALLOCATE,
+            order_id=order["order_id"],
+            warehouse=warehouse,
+            message="allocate available stock",
         )
 
-        warehouses_summary = "\n".join(
-            [
-                (
-                    f"- {w['warehouse_id']}: {w['city']}, "
-                    f"stock={sum(w['stock_level'].values())} units"
-                )
-                for w in observation["warehouses"]
-            ]
+    return Action(
+        action_type=ActionType.CHECK_STOCK,
+        order_id=order["order_id"],
+        warehouse=None,
+        message="recheck stock",
+    )
+
+
+def _build_local_action(order: Dict[str, Any], observation: Dict[str, Any], task_difficulty: str) -> Action:
+    status = order["status"]
+    if status == "allocated":
+        return Action(
+            action_type=ActionType.SHIP,
+            order_id=order["order_id"],
+            warehouse=None,
+            message="ship allocated order",
         )
+    if status in {"stock_checked", "address_validated"}:
+        return _build_progressed_action(order, observation)
+    if status == "pending":
+        return _build_pending_action(order, task_difficulty)
+    return Action(
+        action_type=ActionType.CHECK_STOCK,
+        order_id=order["order_id"],
+        warehouse=None,
+        message="default",
+    )
 
-        return f"""
-Step {step_num}: Warehouse Logistics Task
 
-Current Orders ({len(observation['orders'])}):
-{orders_summary}
-
-Available Warehouses:
-{warehouses_summary}
-
-Processed: {observation['processed_orders']}/{len(observation['orders'])}
-Failed: {observation['failed_orders']}
-
-Choose one next best action and respond with JSON only:
-{{
-  "action_type": "check_stock|validate_address|allocate|ship|reroute",
-  "order_id": "ORD-XXX",
-  "warehouse": "WAREHOUSE-ID (optional)",
-  "reason": "brief explanation"
-}}
-""".strip()
-
-    def _parse_action_response(self, response_text: str, observation: Dict[str, Any]) -> Action:
-        """
-        Parse model response into Action.
-
-        Args:
-            response_text: Text content from model output
-            observation: Observation for safe fallback values
-
-        Returns:
-            Parsed Action object
-        """
-        try:
-            start = response_text.find("{")
-            end = response_text.rfind("}") + 1
-            if start >= 0 and end > start:
-                payload = json.loads(response_text[start:end])
-                action_raw = str(payload.get("action_type", "check_stock")).strip().lower()
-                # Some models return combined choices like "check_stock|validate_address".
-                if "|" in action_raw:
-                    action_raw = action_raw.split("|")[0].strip()
-                if action_raw not in {item.value for item in ActionType}:
-                    action_raw = "check_stock"
-                return Action(
-                    action_type=ActionType(action_raw),
-                    order_id=payload.get("order_id", observation["orders"][0]["order_id"]),
-                    warehouse=payload.get("warehouse"),
-                    message=payload.get("reason", ""),
-                )
-        except Exception as parse_err:
-            _debug(f"[DEBUG] Failed to parse model response: {parse_err}")
-            _debug(f"[DEBUG] Raw model content: {response_text}")
-
-        return self._get_local_policy_action(observation)
-
-    def _find_actionable_order(self, observation: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """
-        Find next order that is not finished.
-
-        Args:
-            observation: Current observation
-
-        Returns:
-            Order dictionary or None
-        """
-        for order in observation["orders"]:
-            if order["status"] not in ["shipped", "failed"]:
-                return order
-        return None
-
-    def _find_warehouse_with_stock(self, observation: Dict[str, Any], sku: str, quantity: int) -> Optional[str]:
-        """
-        Select first warehouse with enough stock.
-
-        Args:
-            observation: Current observation
-            sku: SKU to check
-            quantity: Required quantity
-
-        Returns:
-            Warehouse ID or None
-        """
-        for wh in observation["warehouses"]:
-            if wh["stock_level"].get(sku, 0) >= quantity:
-                return wh["warehouse_id"]
-        return None
-
-    def _get_local_policy_action(self, observation: Dict[str, Any]) -> Action:
-        """
-        Deterministic fallback policy to avoid infinite no-op loops.
-
-        Args:
-            observation: Current observation
-
-        Returns:
-            Action chosen by local policy
-        """
-        order = self._find_actionable_order(observation)
-        if not order:
-            # Episode should end soon; send safe action on first order if present.
-            fallback_order_id = observation["orders"][0]["order_id"] if observation["orders"] else "ORD-001"
-            return Action(
-                action_type=ActionType.CHECK_STOCK,
-                order_id=fallback_order_id,
-                warehouse=None,
-                message="No actionable order found",
-            )
-
-        status = order["status"]
-        order_id = order["order_id"]
-        sku = order["sku"]
-        quantity = order["quantity"]
-
-        if status == "allocated":
-            return Action(
-                action_type=ActionType.SHIP,
-                order_id=order_id,
-                warehouse=None,
-                message="Local policy: ship allocated order",
-            )
-
-        if status == "stock_checked" or status == "address_validated":
-            wh = order.get("allocated_warehouse") or self._find_warehouse_with_stock(
-                observation, sku, quantity
-            )
-            if wh:
-                return Action(
-                    action_type=ActionType.ALLOCATE,
-                    order_id=order_id,
-                    warehouse=wh,
-                    message="Local policy: allocate from available warehouse",
-                )
-            return Action(
-                action_type=ActionType.CHECK_STOCK,
-                order_id=order_id,
-                warehouse=None,
-                message="Local policy: re-check stock",
-            )
-
-        if status == "pending":
-            # Medium tasks emphasize address validation first.
-            if self.task_difficulty == "medium":
-                return Action(
-                    action_type=ActionType.VALIDATE_ADDRESS,
-                    order_id=order_id,
-                    warehouse=None,
-                    message="Local policy: validate address first for medium task",
-                )
-            return Action(
-                action_type=ActionType.CHECK_STOCK,
-                order_id=order_id,
-                warehouse=None,
-                message="Local policy: check stock first",
-            )
-
+def _local_policy(observation: Dict[str, Any], task_difficulty: str) -> Action:
+    order = _get_actionable_order(observation)
+    if order is None:
+        fallback_order_id = observation["orders"][0]["order_id"] if observation["orders"] else "ORD-001"
         return Action(
             action_type=ActionType.CHECK_STOCK,
-            order_id=order_id,
+            order_id=fallback_order_id,
             warehouse=None,
-            message="Local policy: default action",
+            message="fallback",
         )
+    return _build_local_action(order, observation, task_difficulty)
 
-    def _get_next_action(self, observation: Dict[str, Any], step_num: int) -> Action:
-        """
-        Get next action from API, with safe fallback.
 
-        Args:
-            observation: Current observation
-            step_num: Step number
-
-        Returns:
-            Next action
-        """
-        if self.disable_api:
-            return self._get_local_policy_action(observation)
-
-        prompt = self._build_prompt(observation, step_num)
-        messages = [
-            {"role": "system", "content": "You are a warehouse logistics AI agent."},
-            {"role": "user", "content": prompt},
-        ]
-
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model_name,
-                messages=messages,
-                temperature=self.model_temperature,
-            )
-            response_text = response.choices[0].message.content
-            if not response_text:
-                raise ValueError("Empty response content")
-            return self._parse_action_response(response_text, observation)
-        except Exception as api_err:
-            self.api_failure_count += 1
-            _debug(
-                "[DEBUG] API call failed "
-                f"({self.api_failure_count}/{self.max_api_failures}): {api_err}"
-            )
-            _debug(f"[DEBUG] base_url={self.api_base_url}, model={self.model_name}")
-
-            if self.api_failure_count >= self.max_api_failures:
-                self.disable_api = True
-                _debug("[DEBUG] API disabled for this episode; switching to local policy.")
-
-            return self._get_local_policy_action(observation)
-
-    def _update_progress_guard(self, observation: Dict[str, Any]) -> None:
-        """
-        Track progress and switch to local policy when the episode stalls.
-
-        Progress is measured as changes in processed/failed order counts.
-
-        Args:
-            observation: Current observation as dict
-        """
-        marker = (observation["processed_orders"], observation["failed_orders"])
-
-        if self.last_progress_marker is None:
-            self.last_progress_marker = marker
-            self.non_progress_steps = 0
-            return
-
-        if marker == self.last_progress_marker:
-            self.non_progress_steps += 1
-        else:
-            self.non_progress_steps = 0
-
-        self.last_progress_marker = marker
-
-        if not self.disable_api and self.non_progress_steps >= self.non_progress_threshold:
-            self.disable_api = True
-            _debug(
-                "[DEBUG] Non-progress guard triggered "
-                f"({self.non_progress_steps} stalled steps). "
-                "Switching to local policy."
-            )
-
-    def run_episode(self) -> Dict[str, Any]:
-        """
-        Run one complete episode.
-
-        Returns:
-            Episode summary
-        """
-        observation = self.env.reset()
-        task_info = self.env.get_task_info()
-        self.log_start(
-            task=task_info.get("difficulty", self.task_difficulty),
-            env_name="warehouse-logistics-env",
-            model=self.model_name,
+def _build_prompt(observation: Dict[str, Any], task_difficulty: str) -> str:
+    orders_summary = []
+    for order in observation["orders"][:5]:
+        orders_summary.append(
+            f"{order['order_id']}|{order['sku']}|{order['quantity']}|{order['status']}|{order['address']}"
         )
+    warehouses_summary = []
+    for warehouse in observation["warehouses"]:
+        stock_total = sum(warehouse["stock_level"].values())
+        warehouses_summary.append(f"{warehouse['warehouse_id']}|{warehouse['city']}|{stock_total}")
 
-        self.history = []
-        self.total_reward = 0.0
-        self.action_count = 0
-        self.api_failure_count = 0
-        self.disable_api = False
-        self.non_progress_steps = 0
-        self.last_progress_marker = None
+    return (
+        f"task={task_difficulty}\n"
+        f"orders={orders_summary}\n"
+        f"warehouses={warehouses_summary}\n"
+        f"processed={observation['processed_orders']} failed={observation['failed_orders']} step={observation['step_count']}\n"
+        "Return JSON only with keys action_type, order_id, warehouse, reason."
+    )
 
-        # Initialize progress marker from reset observation.
-        self._update_progress_guard(observation.model_dump())
 
-        rewards: List[float] = []
-        done = False
-        while not done and self.action_count < self.max_steps:
-            obs_dict = observation.model_dump()
-            action = self._get_next_action(obs_dict, self.action_count + 1)
+def _parse_model_action(response_text: str, observation: Dict[str, Any], task_difficulty: str) -> Action:
+    try:
+        start = response_text.find("{")
+        end = response_text.rfind("}") + 1
+        if start >= 0 and end > start:
+            payload = json.loads(response_text[start:end])
+            action_text = str(payload.get("action_type", "check_stock")).strip().lower()
+            if action_text not in {action.value for action in ActionType}:
+                action_text = "check_stock"
+            order_id = payload.get("order_id") or observation["orders"][0]["order_id"]
+            warehouse = payload.get("warehouse") or None
+            return Action(
+                action_type=ActionType(action_text),
+                order_id=order_id,
+                warehouse=warehouse,
+                message=str(payload.get("reason", "")),
+            )
+    except Exception:
+        pass
 
-            error: Optional[str] = None
-            try:
-                observation, reward, done, _info = self.env.step(action)
-            except Exception as exc:
-                error = str(exc)
-                done = True
-                reward_value = -0.2
-                self.log_step(
-                    step_num=self.action_count + 1,
-                    action=action.action_type.value,
-                    reward=reward_value,
-                    done=done,
-                    error=error,
-                )
-                rewards.append(reward_value)
+    return _local_policy(observation, task_difficulty)
+
+
+def _model_action(observation: Dict[str, Any], task_difficulty: str) -> Action:
+    response = client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": "You choose the next OpenEnv logistics action."},
+            {"role": "user", "content": _build_prompt(observation, task_difficulty)},
+        ],
+        temperature=0.0,
+    )
+    content = response.choices[0].message.content or ""
+    if not content.strip():
+        return _local_policy(observation, task_difficulty)
+    return _parse_model_action(content, observation, task_difficulty)
+
+
+def run_episode(task_difficulty: str) -> None:
+    env = WarehouseLogisticsEnvironment(task_difficulty=task_difficulty)
+    observation = env.reset()
+    rewards: List[float] = []
+    steps_taken = 0
+    success = False
+
+    _log_start(task_difficulty)
+
+    try:
+        for step_num in range(1, MAX_STEPS + 1):
+            if env.done:
                 break
 
-            self._update_progress_guard(observation.model_dump())
+            observation_dict = observation.model_dump()
+            try:
+                action = _model_action(observation_dict, task_difficulty)
+            except Exception:
+                action = _local_policy(observation_dict, task_difficulty)
 
-            self.action_count += 1
-            self.total_reward += reward.value
+            try:
+                next_observation, reward, done, _info = env.step(action)
+                error = None
+            except Exception as exc:
+                next_observation = env.state()
+                reward = env._compute_final_reward()
+                done = True
+                error = str(exc)
+
             rewards.append(reward.value)
+            steps_taken = step_num
+            _log_step(step_num, _serialize_action(action), reward.value, done, error)
 
-            self.log_step(
-                step_num=self.action_count,
-                action=action.action_type.value,
-                reward=reward.value,
-                done=done,
-                error=error,
-            )
+            observation = next_observation
+            if done:
+                break
 
-            self.history.append(
-                {
-                    "step": self.action_count,
-                    "action": action.action_type.value,
-                    "reward": reward.value,
-                    "processed": observation.processed_orders,
-                }
-            )
-
-        completed = sum(1 for order in self.env.orders if order.status.value == "shipped")
-        total_orders = len(self.env.orders)
-        score = completed / total_orders if total_orders > 0 else 0.0
-        score = max(0.0, min(1.0, score))
-        success = score >= 0.8
-
-        summary = {
-            "total_reward": self.total_reward,
-            "completed": completed,
-            "total": total_orders,
-            "steps": self.action_count,
-            "task_difficulty": self.task_difficulty,
-            "api_failures": self.api_failure_count,
-            "rewards": rewards,
-            "score": score,
-            "success": success,
-        }
-
-        self.log_end(
-            success=summary["success"],
-            steps=summary["steps"],
-            score=summary["score"],
-            rewards=summary["rewards"],
+        success = bool(rewards) and bool(observation.orders) and all(
+            order.status.value in {"shipped", "failed"} for order in observation.orders
         )
-        return summary
+    finally:
+        try:
+            env.close()
+        except Exception:
+            pass
+        _log_end(success=success, steps=steps_taken, rewards=rewards)
 
 
-def run_baseline_all_tasks(max_steps: int = 50) -> Dict[str, Any]:
-    """Run baseline evaluation across easy/medium/hard tasks."""
-    task_levels = ["easy", "medium", "hard"]
-    task_results: Dict[str, Dict[str, Any]] = {}
-    scores: List[float] = []
-
-    for level in task_levels:
-        agent = WarehouseAgentInference(task_difficulty=level, max_steps=max_steps)
-        result = agent.run_episode()
-        task_results[level] = result
-        scores.append(result["score"])
-
-    aggregate = sum(scores) / len(scores) if scores else 0.0
-    aggregate = max(0.0, min(1.0, aggregate))
-
-    return {
-        "tasks": task_results,
-        "aggregate_score": aggregate,
-        "all_success": all(r["success"] for r in task_results.values()),
-    }
-
-
-def main() -> int:
-    """Main entry point for running baseline inference."""
-    task_difficulty = os.getenv("TASK_DIFFICULTY", "easy")
-
-    run_all = os.getenv("RUN_ALL_TASKS", "true").lower() == "true"
-    if run_all:
-        _ = run_baseline_all_tasks(max_steps=50)
-    else:
-        agent = WarehouseAgentInference(task_difficulty=task_difficulty, max_steps=50)
-        _ = agent.run_episode()
-
-    # Exit 0 when inference completes and scores are produced for all tasks.
-    return 0
+def main() -> None:
+    for task_difficulty in TASKS:
+        run_episode(task_difficulty)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

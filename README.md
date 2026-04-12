@@ -1,92 +1,18 @@
----
-title: Warehouse Logistics OpenEnv
-emoji: 🚚
-colorFrom: blue
-colorTo: green
-sdk: docker
-app_port: 7860
-pinned: false
----
+﻿# Warehouse Logistics OpenEnv
 
-# Warehouse Logistics AI Environment
+Warehouse Logistics OpenEnv is a real-world style agent environment for order fulfillment. It models tasks humans actually perform in operations teams: stock checks, address validation, allocation, shipping, and rerouting across warehouses.
 
-**E-Commerce Logistics AI Environment (Warehouse Manager Simulator)**
+The environment is designed to be useful for training and evaluating agents in a practical workflow, not a toy game. It follows the OpenEnv interface with typed Pydantic models, `reset()`, `step()`, and `state()`, plus an `openenv.yaml` manifest for validation.
 
-A production-ready OpenEnv-compliant environment for training AI agents in warehouse logistics and order fulfillment. Simulates real-world scenarios including inventory management, address validation, order routing, and multi-warehouse coordination.
+## Why This Environment
 
-## Features
+Agent benchmarks are strongest when the task is concrete, deterministic, and easy to score. Warehouse operations fit that pattern well: the state is structured, the actions are bounded, and progress can be measured at each step. This environment uses that setting to provide incremental reward shaping and deterministic graders.
 
-- ✅ **OpenEnv Specification Compliant**: Full implementation of `reset()`, `step()`, `state()` interface
-- ✅ **Pydantic Type Safety**: All models use Pydantic v2 with full type hints
-- ✅ **3 Difficulty Levels**: Easy (single order), Medium (batch processing), Hard (multi-warehouse routing)
-- ✅ **Shaped Rewards**: Intermediate rewards guide agent learning, not binary rewards
-- ✅ **Deterministic Grading**: Each task has a deterministic grader returning scores 0.0-1.0
-- ✅ **OpenAI Integration**: Baseline agent uses the OpenAI client with deterministic defaults
-- ✅ **Dockerized**: Production-ready Dockerfile with dependencies
-- ✅ **Comprehensive Logging**: Exact logging format [START], [STEP], [END]
+## Core API
 
-## Project Structure
+### Observation Space
 
-```
-logistics-env/
-├── env/
-│   ├── __init__.py
-│   ├── environment.py       # Main environment (OpenEnv compliant)
-│   ├── models.py            # Pydantic data models
-│   ├── tasks.py             # Task definitions (easy/medium/hard)
-│   ├── grader.py            # Deterministic task graders
-│   └── utils.py             # Helper utilities
-├── inference.py             # Baseline agent with OpenAI
-├── test_environment.py      # No-API task demo runner
-├── verify_setup.py          # Dependency and environment checks
-├── openenv.yaml             # Environment configuration
-├── requirements.txt         # Python dependencies
-├── Dockerfile               # Container configuration
-├── .env.example             # Environment variable template
-├── .gitignore               # Git ignore rules
-├── GETTING_STARTED.md       # Quick start guide
-├── FILE_STRUCTURE.md        # Detailed file inventory
-├── DELIVERY_SUMMARY.md      # Delivery and verification summary
-├── INDEX.md                 # Navigation index
-└── README.md                # This file
-```
-
-## Installation
-
-### Local Setup
-
-```bash
-# Clone or download the project
-cd logistics-env
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Set up environment variables
-cp .env.example .env
-# Edit .env with your OpenAI API key
-```
-
-### Docker Setup
-
-```bash
-# Build Docker image
-docker build -t warehouse-logistics-env .
-
-# Run container
-docker run -p 7860:7860 \
-           -e OPENAI_API_KEY=your_key \
-           -e TASK_DIFFICULTY=easy \
-           warehouse-logistics-env
-```
-
-## Observation Space
-
-The observation returned at each step includes:
+Each observation includes:
 
 ```python
 {
@@ -98,17 +24,15 @@ The observation returned at each step includes:
             "address": "123 Main St, New York, NY",
             "status": "pending|stock_checked|address_validated|allocated|shipped|failed",
             "allocated_warehouse": "NYC-01|null"
-        },
-        # ... more orders
+        }
     ],
     "warehouses": [
         {
             "warehouse_id": "NYC-01",
             "city": "New York",
-            "stock_level": {"SKU-001": 50, "SKU-002": 30},
+            "stock_level": {"SKU-001": 50},
             "capacity": 1000
-        },
-        # ... more warehouses
+        }
     ],
     "step_count": 5,
     "processed_orders": 2,
@@ -117,450 +41,84 @@ The observation returned at each step includes:
 }
 ```
 
-## Action Space
+### Action Space
 
-Agents can take 5 types of actions:
+Agents may choose one of five actions:
 
 ```python
 {
     "action_type": "check_stock|validate_address|allocate|ship|reroute",
     "order_id": "ORD-001",
-    "warehouse": "NYC-01",  # Optional, required for allocate/reroute
+    "warehouse": "NYC-01|null",
     "message": "Optional reasoning"
 }
 ```
 
-### Action Types
+### Reward Structure
 
-| Action | Purpose | Reward | Requirements |
-|--------|---------|--------|--------------|
-| `CHECK_STOCK` | Verify inventory availability | +0.2 | Valid order & warehouse |
-| `VALIDATE_ADDRESS` | Check delivery address validity | +0.15/-0.15 | Valid order |
-| `ALLOCATE` | Reserve stock from warehouse | +0.25/-0.15 | Stock available, warehouse specified |
-| `SHIP` | Complete order shipment | +0.3 | Order allocated |
-| `REROUTE` | Move allocation to different warehouse | +0.2 | Stock at target warehouse |
+The environment provides shaped rewards for intermediate progress and a final deterministic score from the grader. Final scores are strictly bounded inside `(0, 1)` so they remain valid for the submission validator.
 
-## Task Descriptions
+## Tasks
 
-### Task 1: Easy - Single Order Stock Check
+### Easy
 
-**Goal**: Process a single order by checking stock availability.
+Single-order stock check. The agent should identify the available warehouse, allocate correctly, and finish the order with minimal steps.
 
-**Scenario**:
-- 1 order for 10 units of SKU-001
-- 2 warehouses (NYC has stock, LA out of stock)
-- Agent must check stock and allocate from NYC
+### Medium
 
-**Success Criteria**:
-- Order status reaches `SHIPPED`
-- Agent efficiently finds available warehouse
-- Score: 0.0-1.0 based on completion and efficiency
+Batch processing with address validation. The agent must validate addresses, reject bad ones, and allocate valid orders efficiently.
 
-**Baseline Score**: ~0.7
+### Hard
 
-### Task 2: Medium - Batch Processing with Address Validation
+Multi-warehouse rerouting. The agent must handle stock shortages, reroute to alternate warehouses, and avoid failed allocations.
 
-**Goal**: Process batch of orders with address validation.
+## Baseline Scores
 
-**Scenario**:
-- 5 mixed orders
-- 3 warehouses with varying inventory
-- Some orders have invalid addresses
-- Agent must validate and allocate appropriately
+The baseline runner in `inference.py` evaluates all three tasks and prints structured logs required by the hackathon submission format.
 
-**Success Criteria**:
-- Valid addresses processed correctly
-- Invalid addresses rejected/failed
-- Orders allocated efficiently
-- All valid orders shipped
+Expected baseline range:
 
-**Baseline Score**: ~0.6
+- Easy: around 0.7
+- Medium: around 0.6
+- Hard: around 0.5
 
-### Task 3: Hard - Multi-Warehouse Routing with Rerouting
-
-**Goal**: Handle out-of-stock scenarios requiring rerouting across warehouses.
-
-**Scenario**:
-- 4 orders requesting premium SKU
-- First warehouse has insufficient stock
-- Agent must detect shortage and reroute to backup warehouse
-- Multi-warehouse decision making required
-
-**Success Criteria**:
-- Correct rerouting when primary warehouse out of stock
-- Load balancing across warehouses
-- All possible orders shipped
-- Efficient path to completion
-
-**Baseline Score**: ~0.5
-
-## Reward Design
-
-Rewards are **shaped** (continuous, intermediate) not binary:
-
-```
-Per-Step Rewards:
-- Correct stock check: +0.2
-- Valid address: +0.15
-- Invalid address: -0.15
-- Successful allocation: +0.25
-- Failed allocation: -0.15
-- Shipment: +0.3
-- Reroute success: +0.2
-- Invalid action: -0.1
-
-Final Reward (Grader-based):
-- Range: 0.0 (complete failure) to 1.0 (perfect)
-- Deterministic scoring based on:
-  - Orders completed
-  - Efficiency (steps taken)
-  - Actions taken
-  - Warehouse utilization
-```
-
-## Grading System
-
-Each task uses a deterministic grader that scores 0.0-1.0:
-
-### Easy Task Grader
-```python
-score = 0.0
-if order is stock_checked: += 0.5
-if order is shipped: += 0.5
-efficiency_penalty: -= (steps - 2) * 0.05
-final_score = clamp(0.0, 1.0)
-```
-
-### Medium Task Grader
-```python
-score = 0.0
-score += # of validate_address actions * 0.1
-score += # of allocated orders * 0.15
-score += # of shipped orders * 0.2
-efficiency_penalty: -= (steps - 20) * 0.01
-final_score = clamp(0.0, 1.0)
-```
-
-### Hard Task Grader
-```python
-score = 0.0
-score += # of reroute actions * 0.15
-score += # of shipped orders * 0.2
-score += min(allocated_from_alternate * 0.25, 0.5)
-score -= failed_orders * 0.1
-efficiency_bonus: += max(0, (50 - steps) * 0.01)
-final_score = clamp(0.0, 1.0)
-```
-
-## Quick Start
-
-### Run Easy Task Locally
-
-```python
-from env import WarehouseLogisticsEnvironment, Action, ActionType
-
-# Create environment
-env = WarehouseLogisticsEnvironment(task_difficulty="easy")
-obs = env.reset()
-
-# Take a step
-action = Action(
-    action_type=ActionType.CHECK_STOCK,
-    order_id="ORD-001",
-    warehouse=None,
-    message="Checking primary warehouse"
-)
-
-obs, reward, done, info = env.step(action)
-
-print(f"Reward: {reward.value}")
-print(f"Orders completed: {obs.processed_orders}")
-print(f"Done: {done}")
-```
-
-### Run Baseline Inference
-
-```bash
-# Set up environment variables
-export OPENAI_API_KEY=sk-...
-export TASK_DIFFICULTY=easy
-export MODEL_NAME=gpt-3.5-turbo
-
-# Run inference with logging
-python inference.py
-```
-
-Output format:
-```
-[START]
-Task: easy
-Env: warehouse-logistics-env
-Model: gpt-3.5-turbo
-
-[STEP]
-Step: 1
-Action: check_stock
-Reward: 0.200
-Done: False
-Error:
-
-[END]
-Success: True
-Steps: 3
-Score: 1.0000
-Rewards: [0.24, 0.29, 0.34]
-```
-
-### Run in Docker
-
-```bash
-docker run -it \
-    -p 7860:7860 \
-  -e OPENAI_API_KEY=sk-... \
-  -e TASK_DIFFICULTY=medium \
-  warehouse-logistics-env
-```
-
-### Deploy to Hugging Face Spaces (Docker)
-
-This repository includes a Docker Space config in `space.yaml` with the `openenv` tag.
-
-1. Create a new Hugging Face Space and select `Docker` SDK.
-2. Push this repository to the Space.
-3. Set required Space secrets:
-     - `OPENAI_API_KEY` (or `HF_TOKEN` as fallback)
-     - `MODEL_NAME`
-     - `API_BASE_URL`
-4. Confirm the Space is healthy:
-     - `GET /health` returns `200`
-     - `POST /reset` returns an initial observation
-
-The container serves an API on port `7860` with endpoints:
-- `GET /health`
-- `POST /reset`
-- `GET /state`
-- `POST /step`
-
-## Configuration
+## Setup
 
 ### Environment Variables
 
-```bash
-OPENAI_API_KEY          # Your OpenAI API key
-MODEL_NAME              # Model (default: gpt-3.5-turbo)
-API_BASE_URL            # Custom API base URL (optional)
-HF_TOKEN                # Hugging Face token (optional, for compatibility)
-TASK_DIFFICULTY         # Task difficulty: easy, medium, hard
-MODEL_TEMPERATURE       # Default: 0.0 for reproducible decoding
-API_TIMEOUT_SECONDS     # API timeout in seconds (default: 30)
-RUN_ALL_TASKS           # true/false; run easy, medium, hard in one invocation
-```
+Set these values before running the baseline:
 
-### YAML Configuration
+- `API_BASE_URL` with a default value
+- `MODEL_NAME` with a default value
+- `HF_TOKEN` required
 
-Edit `openenv.yaml` to customize:
-- Task parameters
-- Observation/action spaces
-- Reward shaping
-- Expected baseline scores
-- Grading criteria
-
-## Development
-
-### Add New Task
-
-```python
-# In env/tasks.py
-@staticmethod
-def create_custom_task():
-    orders = [...]
-    warehouses = [...]
-    config = TaskConfig(...)
-    return orders, warehouses, config
-```
-
-### Add New Action Type
-
-```python
-# In env/models.py
-class ActionType(str, Enum):
-    NEW_ACTION = "new_action"
-
-# In env/environment.py
-def _action_new_action(self, order, action):
-    # Implement action logic
-    return Reward(...)
-```
-
-### Custom Grader
-
-```python
-# In env/grader.py
-class CustomGrader(TaskGrader):
-    def grade(self, orders, warehouses, action_history, step_count):
-        # Implement scoring logic
-        return score  # 0.0-1.0
-```
-
-## API Reference
-
-### WarehouseLogisticsEnvironment
-
-```python
-class WarehouseLogisticsEnvironment:
-    def __init__(self, task_difficulty: str = "easy")
-    def reset() -> Observation
-    def step(action: Action) -> Tuple[Observation, Reward, bool, Dict]
-    def state() -> Observation
-    def get_task_info() -> Dict
-    def get_episode_summary() -> Dict
-```
-
-### Core Models
-
-```python
-class Observation
-class Action
-class Reward
-class Order
-class WarehouseLocation
-class TaskConfig
-```
-
-All models include complete docstrings and type hints.
-
-## Performance Benchmarks
-
-Expected baseline performance with gpt-3.5-turbo:
-
-| Task | Expected Score | Avg Episodes to Converge |
-|------|-----------------|-------------------------|
-| Easy | 0.70 | 3-5 |
-| Medium | 0.60 | 10-15 |
-| Hard | 0.50 | 20-30 |
-
-## Testing
+### Local Run
 
 ```bash
-# Run environment tests
-python -m pytest tests/
-
-# Run single task
-python -c "from env import *; env = WarehouseLogisticsEnvironment('easy'); obs = env.reset(); print(env.get_task_info())"
-
-# Check code quality
-python -m pylint env/
-python -m mypy env/
+python -m venv .venv
+.\.venv\Scripts\activate
+pip install -r requirements.txt
+python inference.py
 ```
 
-## Hackathon Pre-Submission Validation
-
-Run these checks before submitting:
+### Docker Run
 
 ```bash
-# 1) Build container
 docker build -t warehouse-logistics-env .
-
-# 2) Validate OpenEnv spec
-openenv validate
-
-# 3) Run baseline inference (all tasks)
-RUN_ALL_TASKS=true python inference.py
+docker run -p 7860:7860 -e API_BASE_URL=https://api.openai.com/v1 -e MODEL_NAME=gpt-4.1-mini -e HF_TOKEN=your_token warehouse-logistics-env
 ```
 
-For strict evaluator parsing, `inference.py` writes structured logs to stdout using only:
-- `[START]`
-- `[STEP]`
-- `[END]`
+## OpenEnv Compliance
 
-Debug diagnostics are emitted to stderr to avoid corrupting parser input.
+This repository includes:
 
-## Code Quality
+- Typed Pydantic models for observations, actions, and rewards
+- `step(action) -> (observation, reward, done, info)`
+- `reset() -> initial observation`
+- `state() -> current observation`
+- `openenv.yaml` metadata
+- A working Dockerfile for Hugging Face Spaces deployment
 
-- ✅ Type hints on all functions
-- ✅ Docstrings for all methods
-- ✅ No placeholder code
-- ✅ Deterministic graders and deterministic fallback policy
-- ✅ Production-ready error handling
-- ✅ Clean modular architecture
+## Tag
 
-## Logging Format
-
-The inference script logs exactly as specified:
-
-```
-[START]
-Task: <difficulty>
-Env: <env name>
-Model: <model name>
-
-[STEP]
-Step: <n>
-Action: <action>
-Reward: <float>
-Done: <bool>
-Error: <error or empty>
-
-[END]
-Success: <bool>
-Steps: <int>
-Score: <0.0-1.0>
-Rewards: <list>
-```
-
-## Environment Variables Template
-
-Create `.env`:
-```bash
-OPENAI_API_KEY=sk-your-key-here
-MODEL_NAME=gpt-3.5-turbo
-API_BASE_URL=
-HF_TOKEN=
-TASK_DIFFICULTY=easy
-MODEL_TEMPERATURE=0.0
-API_TIMEOUT_SECONDS=30
-RUN_ALL_TASKS=true
-```
-
-## Troubleshooting
-
-### ImportError: No module named 'openai'
-```bash
-pip install --upgrade openai
-```
-
-### CUDA out of memory
-Environment runs on CPU by default. No GPU required.
-
-### OpenAI API errors
-- Verify API key is valid
-- Check rate limits
-- Use `gpt-3.5-turbo` for faster inference
-
-### Address validation too strict
-Edit `validate_address()` in `env/utils.py` to adjust rules.
-
-## Citation
-
-```bibtex
-@article{warehouse-logistics-env,
-  title={Warehouse Logistics AI Environment},
-  author={AI Systems Engineering},
-  year={2024}
-}
-```
-
-## License
-
-MIT License - See LICENSE file
-
-## Support
-
-For issues, questions, or contributions:
-- Check the troubleshooting section
-- Review docstrings in source code
-- Inspect `openenv.yaml` for configuration details
-
----
-
-**Production-Ready** | **OpenEnv Compliant** | **Reproducible Baseline Defaults** | **Type-Safe**
+This project is intended to be published with the `openenv` tag.

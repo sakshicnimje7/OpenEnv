@@ -1,7 +1,7 @@
 """
 Task graders for evaluating agent performance.
 
-Each grader returns a score between 0.0 and 1.0.
+Each grader returns a score strictly between 0.0 and 1.0.
 """
 
 from typing import Dict, List, Any
@@ -10,6 +10,13 @@ from env.models import Order, OrderStatus, WarehouseLocation
 
 class TaskGrader:
     """Base class for task graders."""
+
+    _MIN_SCORE = 0.01
+    _MAX_SCORE = 0.99
+
+    def _clip_score(self, score: float) -> float:
+        """Keep scores inside the open interval required by validation."""
+        return max(self._MIN_SCORE, min(self._MAX_SCORE, score))
     
     def grade(
         self,
@@ -28,7 +35,7 @@ class TaskGrader:
             step_count: Total steps taken
             
         Returns:
-            Score between 0.0 and 1.0
+            Score strictly between 0.0 and 1.0
         """
         raise NotImplementedError
 
@@ -60,12 +67,12 @@ class EasyTaskGrader(TaskGrader):
             step_count: Total steps taken
             
         Returns:
-            Score between 0.0 and 1.0
+            Score strictly between 0.0 and 1.0
         """
         score = 0.0
         
         if not orders:
-            return 0.0
+            return self._clip_score(0.0)
         
         order = orders[0]
         
@@ -90,7 +97,7 @@ class EasyTaskGrader(TaskGrader):
         efficiency_penalty = max(0, (step_count - 2) * 0.05)
         score = max(0.0, score - efficiency_penalty)
         
-        return min(1.0, score)
+        return self._clip_score(score)
 
 
 class MediumTaskGrader(TaskGrader):
@@ -121,12 +128,12 @@ class MediumTaskGrader(TaskGrader):
             step_count: Total steps taken
             
         Returns:
-            Score between 0.0 and 1.0
+            Score strictly between 0.0 and 1.0
         """
         score = 0.0
         
         if not orders:
-            return 0.0
+            return self._clip_score(0.0)
         
         # Count address validations
         validate_actions = [
@@ -153,7 +160,7 @@ class MediumTaskGrader(TaskGrader):
         efficiency_penalty = max(0, (step_count - 20) * 0.01)
         score = max(0.0, score - efficiency_penalty)
         
-        return min(1.0, score)
+        return self._clip_score(score)
 
 
 class HardTaskGrader(TaskGrader):
@@ -185,12 +192,12 @@ class HardTaskGrader(TaskGrader):
             step_count: Total steps taken
             
         Returns:
-            Score between 0.0 and 1.0
+            Score strictly between 0.0 and 1.0
         """
         score = 0.0
         
         if not orders:
-            return 0.0
+            return self._clip_score(0.0)
         
         # Count reroute actions
         reroute_actions = [
@@ -225,7 +232,7 @@ class HardTaskGrader(TaskGrader):
         efficiency_bonus = max(0, (50 - step_count) * 0.01)
         score += efficiency_bonus
         
-        return max(0.0, min(1.0, score))
+        return self._clip_score(score)
 
 
 def get_grader(task_difficulty: str) -> TaskGrader:
