@@ -1,4 +1,17 @@
-﻿# Warehouse Logistics OpenEnv
+﻿---
+title: Warehouse Logistics OpenEnv
+emoji: 🚚
+colorFrom: blue
+colorTo: green
+sdk: docker
+sdk_version: "0.0.0"
+python_version: "3.11"
+app_file: app.py
+pinned: false
+app_port: 7860
+---
+
+# Warehouse Logistics OpenEnv
 
 Warehouse Logistics OpenEnv is a real-world style agent environment for order fulfillment. It models tasks humans actually perform in operations teams: stock checks, address validation, allocation, shipping, and rerouting across warehouses.
 
